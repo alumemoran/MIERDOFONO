@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIERDÓFONO 1.0</title>
+<style>
+  :root { color-scheme: dark; --bg:#171717; --panel:#242424; --line:#555; --accent:#e6d56a; --red:#d64a3d; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:repeating-linear-gradient(0deg,#171717 0 3px,#191919 3px 6px); color:#f2f0e6; font-family:monospace; padding:18px; }
+  main { max-width:650px; margin:auto; }
+  header { border:3px solid #aaa; background:#303030; padding:16px; box-shadow:6px 6px 0 #080808; }
+  .brand { font-size:clamp(28px,8vw,48px); font-weight:900; letter-spacing:-2px; line-height:1; }
+  .subtitle { color:var(--accent); margin-top:9px; font-size:12px; }
+  .screen { margin-top:18px; border:3px inset #888; background:#101610; color:#9fcb87; padding:16px; min-height:88px; }
+  #status { font-size:16px; font-weight:bold; }
+  #timer { font-size:30px; margin-top:8px; font-variant-numeric:tabular-nums; }
+  section { margin-top:16px; padding:15px; border:2px solid var(--line); background:var(--panel); }
+  h2 { margin:0 0 12px; font-size:16px; color:var(--accent); }
+  .buttons { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+  button, select, input[type=text] { font:inherit; }
+  button { min-height:48px; padding:10px; border:2px outset #aaa; background:#d6d2c4; color:#111; font-weight:bold; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.record { background:var(--red); color:white; border-color:#ff988d; }
+  button:active:not(:disabled) { border-style:inset; transform:translateY(1px); }
+  select, input[type=text] { width:100%; padding:12px; background:#111; color:#eee; border:2px inset #777; margin-top:7px; }
+  label { display:block; margin-top:12px; font-size:13px; }
+  .hint { color:#bbb; font-size:12px; line-height:1.5; }
+  .meter { height:12px; background:#111; border:1px solid #777; margin-top:12px; overflow:hidden; }
+  #meterFill { height:100%; width:0%; background:repeating-linear-gradient(90deg,#9fcb87 0 8px,#426a37 8px 11px); }
+  .recording { color:#ff756a !important; }
+  .clip { border-top:1px dashed #777; padding:12px 0; }
+  .clip:first-child { border-top:0; }
+  .clip strong { display:block; overflow-wrap:anywhere; margin-bottom:8px; }
+  audio { width:100%; margin:6px 0; }
+  a.download { color:var(--accent); display:inline-block; margin:6px 12px 0 0; }
+  footer { text-align:center; color:#999; font-size:11px; padding:18px 0 5px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="brand">MIERDÓFONO™</div>
+  <div class="subtitle">GRABADORA DE BAJA FIDELIDAD · EDICIÓN PATATA</div>
+</header>
+
+<div class="screen" aria-live="polite">
+  <div id="status">SISTEMA LISTO. PREPÁRATE PARA EL DESASTRE.</div>
+  <div id="timer">00:00</div>
+  <div class="meter"><div id="meterFill"></div></div>
+</div>
+
+<section>
+  <h2>01 / CONTROLES DE GRABACIÓN</h2>
+  <div class="buttons">
+    <button id="recordBtn" class="record">● GRABAR</button>
+    <button id="stopBtn" disabled>■ DETENER</button>
+  </div>
+  <p class="hint">La primera vez, permite el acceso al micrófono. La grabación solo empieza cuando pulsas GRABAR.</p>
+</section>
+
+<section>
+  <h2>02 / NIVEL DE DESGRACIA</h2>
+  <label for="mode">Selecciona cómo arruinar el audio:</label>
+  <select id="mode">
+    <option value="potato">🥔 Modo papa (calidad horrible)</option>
+    <option value="am">📻 Radio AM oxidada</option>
+    <option value="cassette">📼 Casete gastado</option>
+    <option value="clean">🎙️ Casi decente (qué decepción)</option>
+  </select>
+  <label for="noise">Ruido de fondo: <span id="noiseValue">35%</span></label>
+  <input id="noise" type="range" min="0" max="80" value="35" style="width:100%">
+  <p class="hint">Los efectos se aplican en tiempo real mientras grabas. Con audífonos puedes evitar que el sonido de monitorización vuelva a entrar por el micrófono.</p>
+</section>
+
+<section>
+  <h2>03 / TUS GRABACIONES LEGENDARIAS</h2>
+  <div id="clips"><p class="hint">Todavía no hay grabaciones. El museo del ruido está vacío.</p></div>
+</section>
+
+<footer>MIERDÓFONO 1.0 · NO GARANTIZA CALIDAD, TALENTO NI DIGNIDAD</footer>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const recordBtn = $('recordBtn'), stopBtn = $('stopBtn');
+  const status = $('status'), timer = $('timer'), meterFill = $('meterFill');
+  const mode = $('mode'), noise = $('noise'), noiseValue = $('noiseValue');
+  let stream = null, audioContext = null, source = null, processor = null, analyser = null;
+  let chunks = [], recording = false, startedAt = 0, timerLoop = null, meterLoop = null;
+  let noiseBuffer = null, noiseSource = null, noiseGain = null, filter = null, compressor = null;
+  let recordedClips = [];
+
+  const fmt = seconds => {
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
+  noise.addEventListener('input', () => noiseValue.textContent = `${noise.value}%`);
+
+  function makeNoiseBuffer(ctx) {
+    const buffer = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    return buffer;
+  }
+
+  function applySettings() {
+    if (!audioContext || !filter || !compressor || !noiseGain) return;
+    const m = mode.value;
+    filter.type = 'lowpass';
+    filter.frequency.value = m === 'am' ? 2600 : m === 'potato' ? 3400 : m === 'cassette' ? 4800 : 16000;
+    filter.Q.value = m === 'cassette' ? 1.4 : 0.2;
+    compressor.threshold.value = m === 'potato' ? -28 : m === 'cassette' ? -20 : -12;
+    compressor.ratio.value = m === 'potato' ? 8 : m === 'cassette' ? 4 : 2;
+    noiseGain.gain.value = Number(noise.value) / 100 * (m === 'clean' ? 0.015 : m === 'am' ? 0.10 : 0.17);
+  }
+  mode.addEventListener('change', applySettings);
+  noise.addEventListener('input', applySettings);
+
+  async function startRecording() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      status.textContent = 'ERROR: ABRE ESTA PÁGINA EN HTTPS O EN UN NAVEGADOR COMPATIBLE.';
+      return;
+    }
+    try {
+      recordBtn.disabled = true;
+      status.textContent = 'PIDIENDO PERMISO AL MICRÓFONO...';
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audioContext = new AudioCtx();
+      await audioContext.resume();
+      source = audioContext.createMediaStreamSource(stream);
+      filter = audioContext.createBiquadFilter();
+      compressor = audioContext.createDynamicsCompressor();
+      noiseGain = audioContext.createGain();
+      noiseBuffer = makeNoiseBuffer(audioContext);
+      noiseSource = audioContext.createBufferSource();
+      noiseSource.buffer = noiseBuffer;
+      noiseSource.loop = true;
+      noiseSource.connect(noiseGain);
+      noiseGain.connect(filter);
+      source.connect(filter);
+      filter.connect(compressor);
+
+      // Capture the processed audio output using a MediaStream destination.
+      const destination = audioContext.createMediaStreamDestination();
+      compressor.connect(destination);
+      const mime = ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus'].find(t => MediaRecorder.isTypeSupported(t));
+      const recorder = mime ? new MediaRecorder(destination.stream, {mimeType:mime}) : new MediaRecorder(destination.stream);
+      chunks = [];
+      recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.onstop = () => {
+        const type = recorder.mimeType || 'audio/webm';
+        const blob = new Blob(chunks, {type});
+        if (blob.size > 0) addClip(blob, type);
+        else status.textContent = 'NO SE CAPTURÓ AUDIO. EL SILENCIO TAMBIÉN ES ARTE.';
+        cleanup();
+      };
+      applySettings();
+      noiseSource.start();
+      recorder.start(250);
+      window.currentRecorder = recorder;
+      recording = true;
+      startedAt = Date.now();
+      status.textContent = '● GRABANDO... HAZ TU PEOR ÉXITO MUSICAL';
+      status.classList.add('recording');
+      stopBtn.disabled = false;
+      mode.disabled = true;
+      noise.disabled = true;
+      timerLoop = setInterval(() => timer.textContent = fmt((Date.now() - startedAt) / 1000), 200);
+      analyser = audioContext.createAnalyser();
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.fftSize);
+      const drawMeter = () => {
+        if (!recording || !analyser) return;
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+        const rms = Math.sqrt(sum / data.length);
+        meterFill.style.width = `${Math.min(100, rms * 260)}%`;
+        meterLoop = requestAnimationFrame(drawMeter);
+      };
+      drawMeter();
+      recordBtn._recorder = recorder;
+    } catch (err) {
+      status.classList.remove('recording');
+      status.textContent = 'NO SE PUDO GRABAR: ' + (err.name === 'NotAllowedError' ? 'PERMISO DE MICRÓFONO DENEGADO.' : err.message);
+      recordBtn.disabled = false;
+      cleanup();
+    }
+  }
+
+  function cleanup() {
+    recording = false;
+    if (timerLoop) clearInterval(timerLoop);
+    if (meterLoop) cancelAnimationFrame(meterLoop);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (audioContext && audioContext.state !== 'closed') audioContext.close();
+    stream = audioContext = source = processor = analyser = noiseSource = noiseGain = filter = compressor = null;
+    recordBtn.disabled = false;
+    stopBtn.disabled = true;
+    mode.disabled = false;
+    noise.disabled = false;
+    status.classList.remove('recording');
+    meterFill.style.width = '0%';
+  }
+
+  function stopRecording() {
+    if (!recording) return;
+    status.textContent = 'PROCESANDO TU OBRA MAESTRA...';
+    timer.textContent = fmt((Date.now() - startedAt) / 1000);
+    const recorder = window.currentRecorder;
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    else cleanup();
+    status.textContent = 'GRABACIÓN TERMINADA. SE HA REGISTRADO EL DESASTRE.';
+  }
+
+  function addClip(blob, type) {
+    const url = URL.createObjectURL(blob);
+    const number = recordedClips.length + 1;
+    const ext = type.includes('ogg') ? 'ogg' : 'webm';
+    const name = `mierdofono-grabacion-${String(number).padStart(2,'0')}.${ext}`;
+    recordedClips.push({url, name});
+    if (recordedClips.length === 1) $('clips').innerHTML = '';
+    const item = document.createElement('div');
+    item.className = 'clip';
+    const title = document.createElement('strong');
+    title.textContent = `GRABACIÓN ${String(number).padStart(2,'0')} · ${name}`;
+    const player = document.createElement('audio');
+    player.controls = true;
+    player.src = url;
+    const download = document.createElement('a');
+    download.className = 'download';
+    download.href = url;
+    download.download = name;
+    download.textContent = '↓ GUARDAR AUDIO';
+    const rename = document.createElement('button');
+    rename.textContent = 'RENOMBRAR';
+    rename.style.minHeight = '36px';
+    rename.style.marginTop = '8px';
+    rename.addEventListener('click', () => {
+      const next = prompt('Nombre para esta grabación:', name.replace(/\.[^.]+$/, ''));
+      if (next && next.trim()) {
+        const safe = next.trim().replace(/[\\/:*?"<>|]/g, '_');
+        download.download = safe + '.' + ext;
+        title.textContent = `GRABACIÓN ${String(number).padStart(2,'0')} · ${safe}.${ext}`;
+      }
+    });
+    item.append(title, player, document.createElement('br'), download, rename);
+    $('clips').prepend(item);
+    status.textContent = 'AUDIO GUARDADO EN LA LISTA. TU LEGADO ESTÁ A SALVO.';
+  }
+
+  recordBtn.addEventListener('click', startRecording);
+  stopBtn.addEventListener('click', stopRecording);
+})();
+</script>
+</body>
+</html>
